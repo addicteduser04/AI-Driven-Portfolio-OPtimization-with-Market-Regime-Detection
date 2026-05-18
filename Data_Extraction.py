@@ -1,68 +1,87 @@
-import pandas as pd
-import numpy as np
-import yfinance as yf
 import warnings
 
-# Suppress yfinance warnings for cleaner output
-warnings.filterwarnings('ignore')
+import numpy as np
+import pandas as pd
+import yfinance as yf
 
-def build_data_pipeline(start_date="2015-01-01", end_date="2026-01-01"):
+warnings.filterwarnings("ignore")
+
+MARKET_TICKER = "SPY"
+FACTOR_TICKERS = ["MTUM", "VLUE", "QUAL", "USMV"]
+ALL_TICKERS = [MARKET_TICKER, *FACTOR_TICKERS]
+
+
+def _extract_adjusted_close(downloaded_data: pd.DataFrame) -> pd.DataFrame:
+    """Return a clean adjusted-close price table from yfinance output."""
+    if isinstance(downloaded_data.columns, pd.MultiIndex):
+        if "Adj Close" in downloaded_data.columns.get_level_values(0):
+            prices = downloaded_data["Adj Close"].copy()
+        elif "Close" in downloaded_data.columns.get_level_values(0):
+            prices = downloaded_data["Close"].copy()
+        else:
+            raise ValueError("Could not find adjusted close prices in downloaded market data.")
+    else:
+        prices = downloaded_data.copy()
+
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame(name=MARKET_TICKER)
+
+    missing_tickers = [ticker for ticker in ALL_TICKERS if ticker not in prices.columns]
+    if missing_tickers:
+        raise ValueError(f"Missing price history for tickers: {missing_tickers}")
+
+    return prices[ALL_TICKERS].sort_index().dropna(how="all")
+
+
+def build_data_pipeline(start_date: str = "2015-01-01", end_date: str = "2026-01-01") -> pd.DataFrame:
     """
-    Fetches market data, engineers features for HMM, and aligns the time series.
+    Fetch price history and build the aligned dataset used by the HMM and allocator.
+
+    Output columns contain:
+    - HMM emissions derived from `SPY`
+    - factor log returns for `MTUM`, `VLUE`, `QUAL`, `USMV`
     """
-    
-    # 1. Define the assets
-    # SPY: S&P 500 (Broad Market Index for Regime Detection)
-    # MTUM: Momentum Factor
-    # VLUE: Value Factor
-    # QUAL: Quality Factor
-    # USMV: Minimum Volatility Factor
-    tickers = ['SPY', 'MTUM', 'VLUE', 'QUAL', 'USMV']
-    
     print(f"Fetching historical data from {start_date} to {end_date}...")
-    
-    # 2. Fetch the data
-    # We use 'Adj Close' to account for dividends and stock splits
-    raw_prices = yf.download(tickers, start=start_date, end=end_date, auto_adjust = False)['Adj Close']
-    
-    print("Engineering features...")
-    
-    # 3. Engineer Features
-    # A. Calculate Daily Logarithmic Returns
-    # Log returns are preferred because they are time-additive and more normally distributed
-    log_returns = np.log(raw_prices / raw_prices.shift(1))
-    
-    # B. Calculate 20-Day Rolling Realized Volatility
-    # The HMM will observe the broad market (SPY) volatility to detect regimes.
-    # We multiply by np.sqrt(252) to annualize the daily standard deviation.
-    volatility_window = 20
-    realized_volatility = log_returns.rolling(window=volatility_window).std() * np.sqrt(252)
-    
-    # Combine the observable emissions the HMM will use to detect states
-    hmm_features = pd.DataFrame({
-        'SPY_Log_Return': log_returns['SPY'],
-        'SPY_Realized_Vol': realized_volatility['SPY']
-    })
-    
-    print("Cleaning and aligning data...")
-    
-    # 4. Clean and Structure Data
-    # The rolling window will generate 20 days of NaNs at the start of the dataset.
-    hmm_features_clean = hmm_features.dropna()
-    log_returns_clean = log_returns.dropna()
-    
-    # Join the datasets ensuring all time series are perfectly aligned by date
-    # This prevents look-ahead bias and alignment errors during backtesting
-    aligned_dataset = hmm_features_clean.join(log_returns_clean.drop(columns=['SPY']), how='inner')
-    
-    return aligned_dataset
 
-# Execute the pipeline
+    downloaded_data = yf.download(
+        ALL_TICKERS,
+        start=start_date,
+        end=end_date,
+        auto_adjust=False,
+        progress=False,
+    )
+    print(f"Dataset avant feature engineering : {downloaded_data.info()}")
+    print(f"Dataset head avant feature engineering : {downloaded_data.head()}")
+    print(f"Dataset Statistics avant feature engineering : {downloaded_data.describe()}")
+    prices = _extract_adjusted_close(downloaded_data)
+    print("Engineering features...")
+
+    log_returns = np.log(prices / prices.shift(1))
+    realized_volatility = log_returns[MARKET_TICKER].rolling(window=20).std() * np.sqrt(252)
+
+    dataset = pd.DataFrame(
+        {
+            "SPY_Log_Return": log_returns[MARKET_TICKER],
+            "SPY_Realized_Vol": realized_volatility,
+        },
+        index=prices.index,
+    )
+
+    for ticker in FACTOR_TICKERS:
+        dataset[ticker] = log_returns[ticker]
+
+    print("Cleaning and aligning data...")
+    dataset = dataset.dropna().copy()
+    dataset.index.name = "Date"
+
+    return dataset
+
+
 if __name__ == "__main__":
     market_data = build_data_pipeline()
-    
     print("\n--- Pipeline Execution Complete ---")
     print(f"Total Trading Days Processed: {market_data.shape[0]}")
+    print(f"Dataset infos : {market_data.info()}")
+    print(f"Dataset statistics : {market_data.describe()}")
     print("\nFirst 5 rows of the structured dataset:")
     print(market_data.head())
-

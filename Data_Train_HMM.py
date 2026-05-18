@@ -1,58 +1,98 @@
-from hmmlearn.hmm import GaussianHMM
-import pandas as pd
 import numpy as np
+import pandas as pd
+from hmmlearn.hmm import GaussianHMM
 
-def train_and_decode_hmm(dataset, n_states=2):
+
+def _build_hmm_model(n_states: int) -> GaussianHMM:
+    """Create the Gaussian HMM with the project's fixed configuration."""
+    return GaussianHMM(
+        n_components=n_states,
+        covariance_type="full",
+        n_iter=200,
+        random_state=42,
+    )
+
+
+def _identify_risk_off_state(
+    hmm_model: GaussianHMM,
+    training_slice: np.ndarray,
+    training_index: pd.Index,
+    training_volatility: pd.Series,
+) -> int:
+    """Map the model's arbitrary state labels to the highest-volatility regime."""
+    training_states = pd.Series(
+        hmm_model.predict(training_slice),
+        index=training_index,
+        name="HMM_State",
+    )
+    state_volatility = training_volatility.groupby(training_states).mean().sort_values()
+    return int(state_volatility.idxmax())
+
+
+def train_and_decode_hmm(
+    dataset: pd.DataFrame,
+    n_states: int = 2,
+    warmup_periods: int = 252,
+    refit_every: int = 21,
+) -> tuple[pd.DataFrame, GaussianHMM]:
     """
-    Trains a Gaussian HMM on market data and decodes the hidden regimes.
+    Train a Gaussian HMM with a walk-forward expanding window to avoid lookahead bias.
+
+    At each time step `t`, the model:
+    - trains only on data strictly before `t`
+    - refits on a fixed cadence for efficiency
+    - scores only the current observation via `predict_proba`
     """
-    print(f"Training {n_states}-State Hidden Markov Model...")
-    
-    # 1. Prepare the Training Data (The "Emissions")
-    # The HMM needs a 2D array of our observable features.
-    X = dataset[['SPY_Log_Return', 'SPY_Realized_Vol']].values
-    
-    # 2. Initialize the Model
-    # covariance_type='full' means the model assumes returns and volatility can interact
-    # n_iter=100 gives the EM algorithm up to 100 loops to find the best mathematical fit
-    hmm_model = GaussianHMM(n_components=n_states, covariance_type="full", n_iter=100, random_state=42)
-    
-    # 3. Train the Model (Expectation-Maximization)
-    hmm_model.fit(X)
-    
-    # 4. Decode the States (Viterbi Algorithm)
-    # This assigns an integer (0 or 1) to every single day in the dataset
-    hidden_states = hmm_model.predict(X)
-    
-    # Add the hidden states back to our pandas dataframe
-    dataset['HMM_State'] = hidden_states
-    
-    # 5. Physically Label the Regimes (Interpretation)
-    # The HMM assigns 0 and 1 randomly. We need to figure out which is the "Bear" market.
-    # We do this by finding which state has the highest average realized volatility.
-    
-    state_volatility = {}
-    for i in range(n_states):
-        # Filter the dataset for each state and calculate the mean volatility
-        mean_vol = dataset[dataset['HMM_State'] == i]['SPY_Realized_Vol'].mean()
-        state_volatility[i] = mean_vol
-        
-    # The state with the maximum mean volatility is our "Risk-Off" (Bear) regime
-    risk_off_state = max(state_volatility, key=state_volatility.get)
-    
-    # Create a human-readable column for your portfolio optimizer to use later
-    dataset['Regime'] = np.where(dataset['HMM_State'] == risk_off_state, 'Risk-Off', 'Risk-On')
-    
+    print(f"Training {n_states}-state Hidden Markov Model with walk-forward decoding...")
+
+    decoded_dataset = dataset.copy()
+    model_input = decoded_dataset[["SPY_Log_Return", "SPY_Realized_Vol"]].to_numpy()
+
+    hmm_states = np.full(len(decoded_dataset), np.nan)
+    risk_off_probability = np.full(len(decoded_dataset), np.nan)
+    regimes = np.full(len(decoded_dataset), None, dtype=object)
+
+    current_model: GaussianHMM | None = None
+    current_risk_off_state: int | None = None
+
+    for position in range(len(decoded_dataset)):
+        if position < warmup_periods:
+            continue
+
+        should_refit = current_model is None or (position - warmup_periods) % refit_every == 0
+        if should_refit:
+            training_slice = model_input[:position]
+            current_model = _build_hmm_model(n_states)
+            current_model.fit(training_slice)
+            current_risk_off_state = _identify_risk_off_state(
+                hmm_model=current_model,
+                training_slice=training_slice,
+                training_index=decoded_dataset.index[:position],
+                training_volatility=decoded_dataset["SPY_Realized_Vol"].iloc[:position],
+            )
+
+        posterior = current_model.predict_proba(model_input[position : position + 1])[0]
+        current_state = int(np.argmax(posterior))
+
+        hmm_states[position] = current_state
+        risk_off_probability[position] = posterior[current_risk_off_state]
+        regimes[position] = "Risk-Off" if current_state == current_risk_off_state else "Risk-On"
+
+    decoded_dataset["HMM_State"] = hmm_states
+    decoded_dataset["Regime"] = pd.Series(regimes, index=decoded_dataset.index, dtype="object")
+    decoded_dataset["Risk_Off_Probability"] = risk_off_probability
+
+    if current_model is None or current_risk_off_state is None:
+        current_model = _build_hmm_model(n_states)
+        print("\n--- HMM Training Incomplete ---")
+        print("Not enough history to fit the walk-forward HMM.")
+        return decoded_dataset, current_model
+
     print("\n--- HMM Training Complete ---")
-    print(f"Risk-Off State identified as State {risk_off_state}")
-    
-    # Print the transition matrix (probability of switching states tomorrow)
-    print("\nTransition Matrix:")
-    print(np.round(hmm_model.transmat_, 3))
-    
-    return dataset, hmm_model
+    print(f"Warmup periods: {warmup_periods}")
+    print(f"Refit cadence: every {refit_every} bars")
+    print(f"Latest Risk-Off state identified as State {current_risk_off_state}")
+    print("\nLatest Transition Matrix:")
+    print(np.round(current_model.transmat_, 3))
 
-# ==========================================
-# Assuming 'market_data' is the output from Phase 1
-# market_data_with_regimes, trained_model = train_and_decode_hmm(market_data)
-# ==========================================
+    return decoded_dataset, current_model
