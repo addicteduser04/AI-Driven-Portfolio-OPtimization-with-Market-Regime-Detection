@@ -2,6 +2,13 @@ import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
 
+HMM_FEATURE_COLUMNS = [
+    "SPY_Log_Return",
+    "SPY_Realized_Vol",
+    "SPY_Vol_ZScore",
+    "SPY_Drawdown_63",
+]
+
 
 def _build_hmm_model(n_states: int) -> GaussianHMM:
     """Create the Gaussian HMM with the project's fixed configuration."""
@@ -31,7 +38,7 @@ def _identify_risk_off_state(
 
 def train_and_decode_hmm(
     dataset: pd.DataFrame,
-    n_states: int = 2,
+    n_states: int = 3,
     warmup_periods: int = 252,
     refit_every: int = 21,
 ) -> tuple[pd.DataFrame, GaussianHMM]:
@@ -46,7 +53,7 @@ def train_and_decode_hmm(
     print(f"Training {n_states}-state Hidden Markov Model with walk-forward decoding...")
 
     decoded_dataset = dataset.copy()
-    model_input = decoded_dataset[["SPY_Log_Return", "SPY_Realized_Vol"]].to_numpy()
+    model_input = decoded_dataset[HMM_FEATURE_COLUMNS].to_numpy()
 
     hmm_states = np.full(len(decoded_dataset), np.nan)
     risk_off_probability = np.full(len(decoded_dataset), np.nan)
@@ -91,6 +98,7 @@ def train_and_decode_hmm(
     print("\n--- HMM Training Complete ---")
     print(f"Warmup periods: {warmup_periods}")
     print(f"Refit cadence: every {refit_every} bars")
+    print(f"HMM features: {', '.join(HMM_FEATURE_COLUMNS)}")
     print(f"Latest Risk-Off state identified as State {current_risk_off_state}")
     print("\nLatest Transition Matrix:")
     print(np.round(current_model.transmat_, 3))

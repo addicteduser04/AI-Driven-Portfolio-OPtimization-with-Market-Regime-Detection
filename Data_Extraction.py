@@ -50,19 +50,25 @@ def build_data_pipeline(start_date: str = "2015-01-01", end_date: str = "2026-01
         auto_adjust=False,
         progress=False,
     )
-    print(f"Dataset avant feature engineering : {downloaded_data.info()}")
-    print(f"Dataset head avant feature engineering : {downloaded_data.head()}")
-    print(f"Dataset Statistics avant feature engineering : {downloaded_data.describe()}")
     prices = _extract_adjusted_close(downloaded_data)
     print("Engineering features...")
 
     log_returns = np.log(prices / prices.shift(1))
     realized_volatility = log_returns[MARKET_TICKER].rolling(window=20).std() * np.sqrt(252)
+    volatility_mean = realized_volatility.rolling(window=63).mean()
+    volatility_std = realized_volatility.rolling(window=63).std()
+    volatility_zscore = (realized_volatility - volatility_mean) / volatility_std
+
+    spy_growth = np.exp(log_returns[MARKET_TICKER].cumsum())
+    rolling_peak = spy_growth.rolling(window=63, min_periods=20).max()
+    drawdown_63 = spy_growth / rolling_peak - 1
 
     dataset = pd.DataFrame(
         {
             "SPY_Log_Return": log_returns[MARKET_TICKER],
             "SPY_Realized_Vol": realized_volatility,
+            "SPY_Vol_ZScore": volatility_zscore,
+            "SPY_Drawdown_63": drawdown_63,
         },
         index=prices.index,
     )
@@ -71,7 +77,7 @@ def build_data_pipeline(start_date: str = "2015-01-01", end_date: str = "2026-01
         dataset[ticker] = log_returns[ticker]
 
     print("Cleaning and aligning data...")
-    dataset = dataset.dropna().copy()
+    dataset = dataset.replace([np.inf, -np.inf], np.nan).dropna().copy()
     dataset.index.name = "Date"
 
     return dataset
@@ -81,7 +87,5 @@ if __name__ == "__main__":
     market_data = build_data_pipeline()
     print("\n--- Pipeline Execution Complete ---")
     print(f"Total Trading Days Processed: {market_data.shape[0]}")
-    print(f"Dataset infos : {market_data.info()}")
-    print(f"Dataset statistics : {market_data.describe()}")
     print("\nFirst 5 rows of the structured dataset:")
     print(market_data.head())

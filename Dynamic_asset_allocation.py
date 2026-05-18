@@ -97,7 +97,7 @@ def _select_estimation_window(
     lookback_window: int,
     min_regime_observations: int,
 ) -> tuple[pd.DataFrame, str]:
-    """Prefer regime-matched history and fall back to generic recent history when needed."""
+    """Use only regime-matched history so the dynamic weights stay regime-conditional."""
     historical_returns = factor_returns.iloc[:current_position]
     historical_regimes = regimes.iloc[:current_position]
 
@@ -105,8 +105,7 @@ def _select_estimation_window(
     if len(regime_matched_window) >= min_regime_observations:
         return regime_matched_window, "Regime-Matched"
 
-    fallback_window = historical_returns.tail(lookback_window)
-    return fallback_window, "Fallback-All-History"
+    return regime_matched_window, "Insufficient-Regime-History"
 
 
 def _compute_strategy_metrics(returns: pd.Series) -> dict[str, float]:
@@ -182,6 +181,8 @@ def run_dynamic_allocation(
     static_weight_history = []
     estimation_source_history = []
     sample_size_history = []
+    previous_dynamic_weights = _equal_weight_portfolio(FACTOR_COLUMNS)
+    previous_kelly_fraction = 1.0
 
     for position, date in enumerate(results.index):
         estimation_window, estimation_source = _select_estimation_window(
@@ -193,9 +194,12 @@ def run_dynamic_allocation(
             min_regime_observations=min_regime_observations,
         )
 
-        if len(estimation_window) < 20:
-            markowitz_weights = _equal_weight_portfolio(FACTOR_COLUMNS)
-            kelly_fraction = 1.0
+        if len(estimation_window) < min_regime_observations:
+            # Do not contaminate the dynamic sleeve with generic all-history data.
+            # If we do not have enough observations for the active regime, we keep
+            # the previous allocation until a regime-specific estimate is stable.
+            markowitz_weights = previous_dynamic_weights
+            kelly_fraction = previous_kelly_fraction
         else:
             mean_returns, covariance = _estimate_annualized_statistics(estimation_window)
             markowitz_weights = _solve_markowitz_weights(
@@ -211,6 +215,9 @@ def run_dynamic_allocation(
                 scale=KELLY_SCALE,
                 floor=KELLY_FLOOR,
             )
+
+        previous_dynamic_weights = markowitz_weights
+        previous_kelly_fraction = kelly_fraction
 
         static_estimation_window = factor_returns.iloc[:position].tail(STATIC_LOOKBACK_WINDOW)
         if len(static_estimation_window) < 20:
