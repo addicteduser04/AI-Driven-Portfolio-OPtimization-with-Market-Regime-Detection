@@ -4,6 +4,7 @@ from pathlib import Path
 os.environ.setdefault("MPLCONFIGDIR", str(Path(".matplotlib").resolve()))
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 FACTOR_COLUMNS = ["MTUM", "VLUE", "QUAL", "USMV"]
@@ -136,6 +137,69 @@ def _plot_allocation_history(dataset: pd.DataFrame, output_dir: Path) -> str:
     return _save_figure(fig, output_dir / "allocation_history.png")
 
 
+def _plot_factor_volatility(dataset: pd.DataFrame, output_dir: Path) -> str:
+    """Plot the rolling volatility evolution for each of the 4 factors."""
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    
+    for factor, color in zip(FACTOR_COLUMNS, colors):
+        factor_volatility = dataset[factor].rolling(ROLLING_WINDOW).std() * (252 ** 0.5)
+        ax.plot(dataset.index, factor_volatility, label=factor, linewidth=2.0, color=color)
+    
+    _shade_risk_off_regimes(ax, dataset)
+    ax.set_title(f"{ROLLING_WINDOW}-Day Rolling Volatility Evolution by Factor")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Annualized Volatility")
+    ax.legend(loc='upper left')
+    ax.grid(alpha=0.3)
+    return _save_figure(fig, output_dir / "factor_volatility_evolution.png")
+
+
+def _plot_train_test_split(dataset: pd.DataFrame, output_dir: Path) -> str:
+    """Create a presentation-friendly chart showing the warmup/train period vs test period."""
+    train_mask = dataset["Regime"].isna()
+    first_test_date = dataset.index[~train_mask][0] if (~train_mask).any() else dataset.index[-1]
+
+    spy_growth = pd.Series(
+        (dataset["SPY_Log_Return"].fillna(0.0)).cumsum().pipe(lambda values: values.apply(lambda x: float(np.exp(x)))),
+        index=dataset.index,
+    )
+
+    train_days = int(train_mask.sum())
+    test_days = int((~train_mask).sum())
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+    ax.plot(dataset.index, spy_growth, color="#1f77b4", linewidth=2.3, label="SPY Growth of $1")
+
+    if train_days > 0:
+        ax.axvspan(dataset.index[0], first_test_date, color="#d9ead3", alpha=0.55, label="Initial Train / Warmup")
+    ax.axvspan(first_test_date, dataset.index[-1], color="#cfe2f3", alpha=0.35, label="Walk-Forward Test")
+    ax.axvline(first_test_date, color="#555555", linestyle="--", linewidth=1.5)
+
+    ax.text(
+        dataset.index[int(len(dataset) * 0.05)],
+        spy_growth.max() * 0.93,
+        f"Train: {train_days} days",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.9},
+    )
+    ax.text(
+        dataset.index[int(len(dataset) * 0.63)],
+        spy_growth.max() * 0.93,
+        f"Test: {test_days} days",
+        fontsize=10,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.9},
+    )
+
+    ax.set_title("Train vs Test Timeline for the Walk-Forward Regime Model")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Growth of $1 in SPY")
+    ax.legend(loc="upper left")
+    ax.grid(alpha=0.3)
+    return _save_figure(fig, output_dir / "train_test_split.png")
+
+
 def plot_strategy_performance(
     dataset: pd.DataFrame,
     performance_summary: pd.DataFrame,
@@ -148,10 +212,12 @@ def plot_strategy_performance(
     output_path = Path(output_dir)
 
     saved_files = [
+        _plot_train_test_split(dataset, output_path),
         _plot_cumulative_performance(dataset, output_path),
         _plot_drawdowns(dataset, output_path),
         _plot_return_distribution(dataset, output_path),
         _plot_factor_returns(dataset, output_path),
+        _plot_factor_volatility(dataset, output_path),
         _plot_rolling_risk_metrics(dataset, output_path),
         _plot_allocation_history(dataset, output_path),
     ]
