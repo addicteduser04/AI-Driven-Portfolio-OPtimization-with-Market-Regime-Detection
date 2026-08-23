@@ -1,49 +1,65 @@
-# Dynamic Asset Allocation with Market Regime Detection
+# Market Regime Detection and Dynamic Asset Allocation
 
-This student research project tests whether market regimes can improve a multi-factor portfolio. It is
-an educational backtest, not an investment product and not investment advice.
+Can market regimes inferred using only information available at each decision date improve dynamic portfolio allocation relative to static benchmarks?
 
-## Pipeline
+This research project combines a walk-forward Gaussian Hidden Markov Model (HMM), rolling Markowitz allocation, fractional Kelly exposure, and transaction-cost modelling across four US equity factor ETFs. The tracked experiment reduced volatility and drawdown, but did not improve return or Sharpe versus SPY—an informative result rather than a selectively reported win.
 
-```text
-Yahoo Finance adjusted prices
-        -> SPY market features
-        -> walk-forward Gaussian HMM
-        -> Markowitz factor weights
-        -> fractional Kelly exposure
-        -> costs, benchmarks, metrics, and charts
+## Tracked out-of-sample results
+
+The current output covers 2,431 trading observations from 3 May 2016 through 31 December 2025. Returns are net of 5 bps per unit of one-way turnover where applicable.
+
+| Strategy | CAGR | Volatility | Sharpe | Max drawdown |
+| --- | ---: | ---: | ---: | ---: |
+| Dynamic HMM + Markowitz + Kelly, net | 9.49% | 12.87% | 0.614 | -19.65% |
+| Rolling Markowitz | 12.34% | 17.56% | 0.637 | -36.74% |
+| Equal-weight factors | 12.84% | 17.25% | 0.671 | -34.98% |
+| SPY buy and hold | 14.99% | 18.06% | 0.754 | -33.72% |
+
+![Tracked strategy performance](outputs/strategy_performance.png)
+
+The regime-aware strategy produced the lowest volatility and shallowest maximum drawdown. SPY retained the strongest CAGR and Sharpe ratio.
+
+## Research design
+
+```mermaid
+flowchart LR
+    A[Adjusted prices<br/>SPY + factor ETFs] --> B[SPY return, volatility,<br/>z-score and drawdown features]
+    B --> C[Walk-forward<br/>3-state Gaussian HMM]
+    C --> D[One-day-lagged<br/>regime signal]
+    A --> E[Historical-only return<br/>and covariance estimates]
+    D --> F[Regime-conditioned<br/>Markowitz weights]
+    E --> F
+    F --> G[Half-Kelly risky exposure]
+    G --> H[Costs, benchmarks,<br/>metrics and robustness checks]
 ```
 
-The risky assets are MTUM, VLUE, QUAL, and USMV. SPY is used for the market-regime features and as a
-buy-and-hold benchmark.
+The risky universe is `MTUM`, `VLUE`, `QUAL`, and `USMV`. SPY supplies market-regime features and serves as a buy-and-hold benchmark.
 
-## Leakage controls
+## Research integrity
 
-- The HMM has an initial 252-row warmup.
-- At every refit, the feature scaler and HMM see only dates before the prediction date.
-- State probabilities use a forward filter. No future observations are used for smoothing.
-- The regime observed after one close is shifted by one day before it becomes a trading signal.
-- Portfolio means and covariances use only returns before the day being traded.
-- Warmup rows are excluded from every strategy, benchmark, metric, and chart.
+- **Temporal fitting:** the first 252 observations form the warm-up. At each refit, the scaler and HMM see only earlier dates.
+- **Forward filtering:** state probabilities update one observation at a time; no future-state smoothing is used.
+- **Signal timing:** the inferred regime is shifted one trading day before it can affect portfolio returns.
+- **Historical inputs:** expected returns and covariance use only factor returns preceding the traded day.
+- **Comparable windows:** all strategies share the same post-warm-up dates.
+- **Explicit frictions:** optimized portfolios pay 5 bps per unit of one-way turnover by default.
+- **Automated checks:** tests cover future-data independence, filtering, state mapping, signal lagging, constraints, Kelly bounds, costs, benchmarks, and performance arithmetic.
 
-## Default methodology
+## Default specification
 
-All defaults are defined in `config.py`.
+| Component | Setting |
+| --- | --- |
+| Data request | 1 Jan 2015–1 Jan 2026 (Yahoo Finance end date is exclusive) |
+| HMM | 3 Gaussian states; expanding history; refit every 21 trading days |
+| Regimes | Risk-On, Neutral, Risk-Off, mapped from historical return/volatility/drawdown statistics |
+| Allocation | 126-day estimates; long-only; weights sum to 1; 75% maximum per factor |
+| Risk aversion | 2.0 / 3.0 / 4.0 for Risk-On / Neutral / Risk-Off |
+| Exposure | Half-Kelly, clipped to 0–100%; 2% constant annual cash return |
+| Costs | 5 bps per unit of one-way turnover |
 
-- Data request: 2015-01-01 through 2026-01-01 (Yahoo's end date is exclusive)
-- HMM: three Gaussian states, expanding training history, refitted every 21 trading days
-- Regimes: Risk-On, Neutral, and Risk-Off, remapped after each fit from historical market statistics
-- Allocation lookback: 126 trading days
-- Portfolio constraints: long-only, sums to one, maximum 75% in one factor
-- Risk aversion: 2.0 in Risk-On, 3.0 in Neutral, and 4.0 in Risk-Off
-- Exposure: half-Kelly, from 0% to 100%; negative estimated excess return produces zero exposure
-- Cash: constant 2% annual return
-- Transaction costs: 5 basis points per unit of one-way turnover
+Robustness scenarios vary HMM state count, refit frequency, allocation lookback, costs, and Kelly fraction.
 
-The comparison strategies are SPY buy-and-hold, equal-weight factors, and rolling Markowitz without
-the HMM/Kelly overlay. All use the same official test dates.
-
-## Installation
+## Run the study
 
 Python 3.12 or newer is recommended.
 
@@ -51,34 +67,30 @@ Python 3.12 or newer is recommended.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-```
-
-## Run the full analysis
-
-```bash
 python main.py
 ```
-
-Run the predefined robustness checks separately from the default specification:
 
 ```bash
 python main.py --run-sensitivity
 ```
 
-Important settings can be changed from the command line:
+Run `python main.py --help` for configurable assumptions.
 
-```bash
-python main.py \
-  --start-date 2015-01-01 \
-  --end-date 2026-01-01 \
-  --hmm-states 3 \
-  --hmm-refit-every 21 \
-  --allocation-lookback 126 \
-  --transaction-cost-bps 5 \
-  --risk-free-rate 0.02
+## Repository map
+
+```text
+config.py                       central research configuration
+Data_Extraction.py              downloads prices and creates market features
+Data_Train_HMM.py               walk-forward HMM fitting and filtering
+Dynamic_asset_allocation.py     allocation, exposure, costs, and metrics
+Data_Visualisation.py           tables, plots, and report generation
+sensitivity_analysis.py         predefined robustness scenarios
+main.py                         command-line pipeline
+tests/                          research-integrity tests
+outputs/                        tracked results from the current methodology
 ```
 
-## Tests and quality checks
+## Quality checks
 
 ```bash
 pytest
@@ -87,44 +99,17 @@ mypy config.py Data_Extraction.py Data_Train_HMM.py Dynamic_asset_allocation.py 
 python -m pip check
 ```
 
-Tests cover sequential filtering, transition effects, future-data independence, state mapping, signal
-lagging, Kelly limits, portfolio constraints, warmup exclusion, transaction costs, benchmarks, and
-performance arithmetic. GitHub Actions runs the same checks on pushes and pull requests.
+## Limitations
 
-## Outputs
-
-Running the project creates an ignored `outputs/` directory containing:
-
-- `research_report.md`
-- `performance_summary.csv`
-- `regime_summary.csv`
-- cumulative wealth, drawdown, regime, state probability, exposure, and turnover charts
-- final HMM transition and standardized emission-mean charts
-
-Generated files are intentionally excluded from Git because they can be reproduced from the code.
-
-## Main limitations
-
-- Yahoo Finance data can change and is not an institutional point-in-time database.
+- Yahoo Finance is not an institutional point-in-time database and historical values can be revised.
 - The risk-free rate is constant rather than a historical Treasury series.
-- Costs are simplified and omit spreads, market impact, taxes, and fund fees.
-- Trades use close-to-close returns without a detailed execution model.
-- Expected returns and HMM regimes are estimates and can be unstable.
-- The default specification is a research choice, not a parameter set optimized for future performance.
+- Costs omit spreads, market impact, taxes, and ETF fees; execution uses close-to-close returns.
+- Regime labels are latent statistical interpretations, not observed economic states.
+- Expected returns, covariances, HMM parameters, and Kelly exposure are estimation-sensitive.
+- Default settings are research choices, not parameters selected for future performance.
 
-## Project structure
+This is an academic research backtest, not investment advice.
 
-```text
-config.py                       shared research settings
-Data_Extraction.py              downloads prices and builds SPY features
-Data_Train_HMM.py               fits and filters the walk-forward HMM
-Dynamic_asset_allocation.py     constructs portfolios and calculates metrics
-Data_Visualisation.py           creates research tables, charts, and report
-main.py                         command-line pipeline
-tests/                          automated research-integrity tests
-```
+## Author
 
-## License and authorship
-
-Academic PFA project at ENSIAS. No open-source license has been selected; all rights are reserved by
-the project author(s).
+**Sifeddine El Kadiri** — Finance & Computer Science Engineering Student at ENSIAS
