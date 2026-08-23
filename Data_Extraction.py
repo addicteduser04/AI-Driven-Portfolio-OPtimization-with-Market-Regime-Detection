@@ -1,13 +1,11 @@
-import warnings
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-warnings.filterwarnings("ignore")
+from config import DEFAULT_CONFIG
 
-MARKET_TICKER = "SPY"
-FACTOR_TICKERS = ["MTUM", "VLUE", "QUAL", "USMV"]
+MARKET_TICKER = DEFAULT_CONFIG.market_ticker
+FACTOR_TICKERS = DEFAULT_CONFIG.factor_tickers
 ALL_TICKERS = [MARKET_TICKER, *FACTOR_TICKERS]
 
 
@@ -33,7 +31,10 @@ def _extract_adjusted_close(downloaded_data: pd.DataFrame) -> pd.DataFrame:
     return prices[ALL_TICKERS].sort_index().dropna(how="all")
 
 
-def build_data_pipeline(start_date: str = "2015-01-01", end_date: str = "2026-01-01") -> pd.DataFrame:
+def build_data_pipeline(
+    start_date: str = DEFAULT_CONFIG.start_date,
+    end_date: str = DEFAULT_CONFIG.end_date,
+) -> pd.DataFrame:
     """
     Fetch price history and build the aligned dataset used by the HMM and allocator.
 

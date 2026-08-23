@@ -1,3 +1,5 @@
+"""Charts and tables for the repaired out-of-sample backtest."""
+
 import os
 from pathlib import Path
 
@@ -7,223 +9,195 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-FACTOR_COLUMNS = ["MTUM", "VLUE", "QUAL", "USMV"]
-WEIGHT_COLUMNS = [f"Weight_{factor}" for factor in FACTOR_COLUMNS]
-ROLLING_WINDOW = 63
+from config import DEFAULT_CONFIG, ProjectConfig
 
 
-def _shade_risk_off_regimes(ax: plt.Axes, dataset: pd.DataFrame) -> None:
-    """Highlight Risk-Off periods on a chart."""
-    in_risk_off = False
-    start_date = None
-
-    for date, regime in dataset["Regime"].items():
-        if regime == "Risk-Off" and not in_risk_off:
-            start_date = date
-            in_risk_off = True
-        elif regime == "Risk-On" and in_risk_off:
-            ax.axvspan(start_date, date, color="#f4cccc", alpha=0.35, linewidth=0)
-            in_risk_off = False
-
-    if in_risk_off:
-        ax.axvspan(start_date, dataset.index[-1], color="#f4cccc", alpha=0.35, linewidth=0)
-
-
-def _save_figure(fig: plt.Figure, output_path: Path) -> str:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+def _save_figure(fig: plt.Figure, path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    return str(output_path)
+    return str(path)
 
 
-def _plot_cumulative_performance(dataset: pd.DataFrame, output_dir: Path) -> str:
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.plot(dataset.index, dataset["Dynamic_Cumulative"], label="Dynamic Markowitz + Kelly", linewidth=2.5)
-    ax.plot(dataset.index, dataset["Static_Cumulative"], label="Static Markowitz", linewidth=1.8, alpha=0.9)
-    _shade_risk_off_regimes(ax, dataset)
-    ax.set_title("Portfolio Growth with HMM Regime Shading")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Growth of $1")
+def _test_data(dataset: pd.DataFrame) -> pd.DataFrame:
+    test = dataset.loc[dataset["Dynamic_Net_Return"].notna()].copy()
+    if test.empty:
+        raise ValueError("There are no valid test-period returns to plot.")
+    return test
+
+
+def _plot_cumulative_wealth(test: pd.DataFrame, output_dir: Path) -> str:
+    columns = {
+        "Dynamic_Gross_Cumulative": "Dynamic gross",
+        "Dynamic_Net_Cumulative": "Dynamic net",
+        "Rolling_Markowitz_Cumulative": "Rolling Markowitz",
+        "Equal_Weight_Cumulative": "Equal weight",
+        "SPY_Buy_Hold_Cumulative": "SPY",
+    }
+    fig, ax = plt.subplots(figsize=(13, 7))
+    for column, label in columns.items():
+        ax.plot(test.index, test[column], label=label)
+    ax.set(title="Out-of-Sample Cumulative Wealth", ylabel="Growth of $1", xlabel="Date")
     ax.legend()
     ax.grid(alpha=0.3)
-    return _save_figure(fig, output_dir / "strategy_performance.png")
+    return _save_figure(fig, output_dir / "cumulative_wealth.png")
 
 
-def _plot_drawdowns(dataset: pd.DataFrame, output_dir: Path) -> str:
-    fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(dataset.index, dataset["Dynamic_Drawdown"], label="Dynamic Drawdown", linewidth=2.0)
-    ax.plot(dataset.index, dataset["Static_Drawdown"], label="Static Markowitz Drawdown", linewidth=1.6, alpha=0.85)
-    ax.fill_between(dataset.index, dataset["Dynamic_Drawdown"], 0, alpha=0.2)
-    ax.set_title("Max Drawdown Profile")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Drawdown")
+def _plot_drawdowns(test: pd.DataFrame, output_dir: Path) -> str:
+    return_series = {
+        "Dynamic net": test["Dynamic_Net_Return"],
+        "Rolling Markowitz": test["Rolling_Markowitz_Return"],
+        "SPY": test["SPY_Buy_Hold_Return"],
+    }
+    fig, ax = plt.subplots(figsize=(13, 6))
+    for label, returns in return_series.items():
+        wealth = (1 + returns).cumprod()
+        drawdown = wealth / wealth.cummax() - 1
+        ax.plot(test.index, drawdown, label=label)
+    ax.set(title="Out-of-Sample Drawdowns", ylabel="Drawdown", xlabel="Date")
     ax.legend()
     ax.grid(alpha=0.3)
-    return _save_figure(fig, output_dir / "drawdown_profile.png")
+    return _save_figure(fig, output_dir / "drawdowns.png")
 
 
-def _plot_return_distribution(dataset: pd.DataFrame, output_dir: Path) -> str:
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.hist(dataset["Dynamic_Portfolio_Return"], bins=50, alpha=0.6, label="Dynamic", density=True)
-    ax.hist(dataset["Static_Portfolio_Return"], bins=50, alpha=0.5, label="Static Markowitz", density=True)
-    ax.axvline(dataset["Dynamic_Portfolio_Return"].mean(), color="C0", linestyle="--", linewidth=1.5)
-    ax.axvline(dataset["Static_Portfolio_Return"].mean(), color="C1", linestyle="--", linewidth=1.5)
-    ax.set_title("Daily Return Distribution")
-    ax.set_xlabel("Daily Return")
-    ax.set_ylabel("Density")
+def _plot_regimes(test: pd.DataFrame, output_dir: Path) -> str:
+    regime_number = test["Trade_Regime"].map({"Risk-On": 0, "Neutral": 1, "Risk-Off": 2})
+    fig, ax = plt.subplots(figsize=(13, 4))
+    ax.step(test.index, regime_number, where="post")
+    ax.set_yticks([0, 1, 2], ["Risk-On", "Neutral", "Risk-Off"])
+    ax.set(title="Lagged Regime Used for Trading", xlabel="Date")
+    ax.grid(alpha=0.3)
+    return _save_figure(fig, output_dir / "regime_timeline.png")
+
+
+def _plot_state_probabilities(test: pd.DataFrame, output_dir: Path) -> str:
+    probability_columns = [
+        column
+        for column in test.columns
+        if column.startswith("State_") and column.endswith("_Probability")
+    ]
+    fig, ax = plt.subplots(figsize=(13, 6))
+    for column in probability_columns:
+        ax.plot(test.index, test[column], label=column.replace("_Probability", ""))
+    ax.set(title="Filtered HMM State Probabilities", ylabel="Probability", xlabel="Date", ylim=(0, 1))
     ax.legend()
     ax.grid(alpha=0.3)
-    return _save_figure(fig, output_dir / "returns_distribution.png")
+    return _save_figure(fig, output_dir / "state_probabilities.png")
 
 
-def _plot_factor_returns(dataset: pd.DataFrame, output_dir: Path) -> str:
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
-    axes = axes.flatten()
-
-    for axis, factor in zip(axes, FACTOR_COLUMNS):
-        axis.plot(dataset.index, dataset[f"{factor}_Cumulative"], linewidth=2.0)
-        axis.set_title(f"{factor} Cumulative Return")
-        axis.set_ylabel("Growth of $1")
-        axis.grid(alpha=0.3)
-
-    return _save_figure(fig, output_dir / "factor_returns.png")
-
-
-def _plot_rolling_risk_metrics(dataset: pd.DataFrame, output_dir: Path) -> str:
-    rolling_dynamic_vol = dataset["Dynamic_Portfolio_Return"].rolling(ROLLING_WINDOW).std() * (252 ** 0.5)
-    rolling_static_vol = dataset["Static_Portfolio_Return"].rolling(ROLLING_WINDOW).std() * (252 ** 0.5)
-
-    dynamic_sharpe = (
-        dataset["Dynamic_Portfolio_Return"].rolling(ROLLING_WINDOW).mean()
-        / dataset["Dynamic_Portfolio_Return"].rolling(ROLLING_WINDOW).std()
-    ) * (252 ** 0.5)
-    static_sharpe = (
-        dataset["Static_Portfolio_Return"].rolling(ROLLING_WINDOW).mean()
-        / dataset["Static_Portfolio_Return"].rolling(ROLLING_WINDOW).std()
-    ) * (252 ** 0.5)
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-
-    axes[0].plot(dataset.index, rolling_dynamic_vol, label="Dynamic Volatility", linewidth=2.0)
-    axes[0].plot(dataset.index, rolling_static_vol, label="Static Markowitz Volatility", linewidth=1.7)
-    axes[0].set_title(f"{ROLLING_WINDOW}-Day Rolling Volatility")
-    axes[0].set_ylabel("Annualized Volatility")
-    axes[0].legend()
-    axes[0].grid(alpha=0.3)
-
-    axes[1].plot(dataset.index, dynamic_sharpe, label="Dynamic Sharpe", linewidth=2.0)
-    axes[1].plot(dataset.index, static_sharpe, label="Static Markowitz Sharpe", linewidth=1.7)
-    axes[1].set_title(f"{ROLLING_WINDOW}-Day Rolling Sharpe Ratio")
-    axes[1].set_xlabel("Date")
-    axes[1].set_ylabel("Sharpe Ratio")
-    axes[1].legend()
-    axes[1].grid(alpha=0.3)
-
-    return _save_figure(fig, output_dir / "rolling_risk_metrics.png")
-
-
-def _plot_allocation_history(dataset: pd.DataFrame, output_dir: Path) -> str:
-    fig, ax = plt.subplots(figsize=(14, 7))
-    stacked_weights = [dataset[column] for column in WEIGHT_COLUMNS] + [dataset["Cash_Weight"]]
-    labels = FACTOR_COLUMNS + ["Cash"]
-    ax.stackplot(dataset.index, stacked_weights, labels=labels, alpha=0.85)
-    ax.set_title("Dynamic Allocation History")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Portfolio Weight")
+def _plot_exposure(test: pd.DataFrame, output_dir: Path, config: ProjectConfig) -> str:
+    weight_columns = [f"Weight_{ticker}" for ticker in config.factor_tickers]
+    fig, ax = plt.subplots(figsize=(13, 6))
+    ax.stackplot(
+        test.index,
+        *[test[column] for column in weight_columns],
+        test["Cash_Weight"],
+        labels=[*config.factor_tickers, "Cash"],
+        alpha=0.85,
+    )
+    ax.set(title="Portfolio Exposure", ylabel="Portfolio weight", xlabel="Date", ylim=(0, 1.05))
     ax.legend(loc="upper left", ncol=3)
-    ax.set_ylim(0, 1.05)
-    ax.grid(alpha=0.25)
-    return _save_figure(fig, output_dir / "allocation_history.png")
+    return _save_figure(fig, output_dir / "portfolio_exposure.png")
 
 
-def _plot_factor_volatility(dataset: pd.DataFrame, output_dir: Path) -> str:
-    """Plot the rolling volatility evolution for each of the 4 factors."""
-    fig, ax = plt.subplots(figsize=(14, 7))
-    
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-    
-    for factor, color in zip(FACTOR_COLUMNS, colors):
-        factor_volatility = dataset[factor].rolling(ROLLING_WINDOW).std() * (252 ** 0.5)
-        ax.plot(dataset.index, factor_volatility, label=factor, linewidth=2.0, color=color)
-    
-    _shade_risk_off_regimes(ax, dataset)
-    ax.set_title(f"{ROLLING_WINDOW}-Day Rolling Volatility Evolution by Factor")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Annualized Volatility")
-    ax.legend(loc='upper left')
+def _plot_turnover(test: pd.DataFrame, output_dir: Path) -> str:
+    fig, ax = plt.subplots(figsize=(13, 5))
+    ax.plot(test.index, test["Turnover"], linewidth=1)
+    ax.set(title="Dynamic Portfolio Turnover", ylabel="One-way turnover", xlabel="Date")
     ax.grid(alpha=0.3)
-    return _save_figure(fig, output_dir / "factor_volatility_evolution.png")
+    return _save_figure(fig, output_dir / "turnover.png")
 
 
-def _plot_train_test_split(dataset: pd.DataFrame, output_dir: Path) -> str:
-    """Create a presentation-friendly chart showing the warmup/train period vs test period."""
-    train_mask = dataset["Regime"].isna()
-    first_test_date = dataset.index[~train_mask][0] if (~train_mask).any() else dataset.index[-1]
+def _regime_summary(test: pd.DataFrame) -> pd.DataFrame:
+    grouped = test.groupby("Trade_Regime")["Dynamic_Net_Return"]
+    summary = grouped.agg(["count", "mean", "std"])
+    summary["Annual Mean Return"] = summary["mean"] * 252
+    summary["Annual Volatility"] = summary["std"] * np.sqrt(252)
+    summary["Time Percentage"] = summary["count"] / len(test)
+    return summary.drop(columns=["mean", "std"])
 
-    spy_growth = pd.Series(
-        (dataset["SPY_Log_Return"].fillna(0.0)).cumsum().pipe(lambda values: values.apply(lambda x: float(np.exp(x)))),
-        index=dataset.index,
-    )
 
-    train_days = int(train_mask.sum())
-    test_days = int((~train_mask).sum())
+def _write_research_report(
+    full_dataset: pd.DataFrame,
+    test: pd.DataFrame,
+    performance_summary: pd.DataFrame,
+    config: ProjectConfig,
+    output_dir: Path,
+) -> str:
+    table_columns = [
+        "CAGR", "Volatility", "Sharpe", "Sortino", "Max Drawdown",
+        "Calmar", "Final Wealth", "Turnover",
+    ]
+    report_table = performance_summary[table_columns].copy()
+    for column in ["CAGR", "Volatility", "Max Drawdown", "Turnover"]:
+        report_table[column] = report_table[column].map(lambda value: f"{float(value):.2%}")
+    for column in ["Sharpe", "Sortino", "Calmar", "Final Wealth"]:
+        report_table[column] = report_table[column].map(lambda value: f"{float(value):.3f}")
 
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.plot(dataset.index, spy_growth, color="#1f77b4", linewidth=2.3, label="SPY Growth of $1")
+    report = f"""# Dynamic Asset Allocation Research Report
 
-    if train_days > 0:
-        ax.axvspan(dataset.index[0], first_test_date, color="#d9ead3", alpha=0.55, label="Initial Train / Warmup")
-    ax.axvspan(first_test_date, dataset.index[-1], color="#cfe2f3", alpha=0.35, label="Walk-Forward Test")
-    ax.axvline(first_test_date, color="#555555", linestyle="--", linewidth=1.5)
+## Methodology
 
-    ax.text(
-        dataset.index[int(len(dataset) * 0.05)],
-        spy_growth.max() * 0.93,
-        f"Train: {train_days} days",
-        fontsize=10,
-        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.9},
-    )
-    ax.text(
-        dataset.index[int(len(dataset) * 0.63)],
-        spy_growth.max() * 0.93,
-        f"Test: {test_days} days",
-        fontsize=10,
-        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.9},
-    )
+- Data: Yahoo Finance adjusted close prices for {config.market_ticker} and {', '.join(config.factor_tickers)}.
+- Full data request: {config.start_date} to {config.end_date} (end date is exclusive).
+- HMM: {config.hmm_states} Gaussian states, {config.hmm_warmup}-row warmup, refit every {config.hmm_refit_every} rows.
+- Leakage controls: historical-only scaling and fitting, forward-only filtering, and a one-day trading-signal lag.
+- State mapping: historical return, volatility, and drawdown rank states as Risk-On, Neutral, and Risk-Off.
+- Allocation: long-only rolling Markowitz over {config.allocation_lookback} rows with a {config.maximum_factor_weight:.0%} weight cap.
+- Exposure: {config.kelly_fraction:.0%} fractional Kelly, bounded between 0% and {config.maximum_risky_exposure:.0%}.
+- Transaction costs: {config.transaction_cost_bps:.1f} basis points per unit of one-way turnover.
+- Cash return: constant {config.annual_risk_free_rate:.2%} annual rate.
 
-    ax.set_title("Train vs Test Timeline for the Walk-Forward Regime Model")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Growth of $1 in SPY")
-    ax.legend(loc="upper left")
-    ax.grid(alpha=0.3)
-    return _save_figure(fig, output_dir / "train_test_split.png")
+## Test period
+
+- Cleaned data start: {full_dataset.index[0].date()}
+- Warmup observations: {config.hmm_warmup}
+- First tradable date: {test.index[0].date()}
+- Final test date: {test.index[-1].date()}
+- Test observations: {len(test)}
+- Average risky exposure: {test['Risky_Exposure'].mean():.2%}
+
+## Results
+
+{report_table.to_markdown()}
+
+## Limitations
+
+This is an educational research backtest, not investment advice. It uses adjusted Yahoo Finance data,
+a constant risk-free rate, simplified transaction costs, close-to-close returns, and no market-impact,
+tax, borrowing, or execution model. HMM and expected-return estimates remain uncertain, and results do
+not guarantee future performance.
+"""
+    path = output_dir / "research_report.md"
+    path.write_text(report, encoding="utf-8")
+    return str(path)
 
 
 def plot_strategy_performance(
     dataset: pd.DataFrame,
     performance_summary: pd.DataFrame,
-    output_dir: str = "outputs",
+    config: ProjectConfig = DEFAULT_CONFIG,
 ) -> list[str]:
-    """Create a multi-chart visual report and save the summary table."""
-    print("Generating strategy report...")
+    """Create report files from one common out-of-sample test slice."""
+    output_dir = Path(config.output_directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    test = _test_data(dataset)
 
-    plt.style.use("default")
-    output_path = Path(output_dir)
-
-    saved_files = [
-        _plot_train_test_split(dataset, output_path),
-        _plot_cumulative_performance(dataset, output_path),
-        _plot_drawdowns(dataset, output_path),
-        _plot_return_distribution(dataset, output_path),
-        _plot_factor_returns(dataset, output_path),
-        _plot_factor_volatility(dataset, output_path),
-        _plot_rolling_risk_metrics(dataset, output_path),
-        _plot_allocation_history(dataset, output_path),
+    files = [
+        _plot_cumulative_wealth(test, output_dir),
+        _plot_drawdowns(test, output_dir),
+        _plot_regimes(test, output_dir),
+        _plot_state_probabilities(test, output_dir),
+        _plot_exposure(test, output_dir, config),
+        _plot_turnover(test, output_dir),
     ]
+    performance_path = output_dir / "performance_summary.csv"
+    performance_summary.to_csv(performance_path)
+    files.append(str(performance_path))
 
-    summary_path = output_path / "performance_summary.csv"
-    performance_summary.to_csv(summary_path)
-    saved_files.append(str(summary_path))
-
-    return saved_files
+    regime_path = output_dir / "regime_summary.csv"
+    _regime_summary(test).to_csv(regime_path)
+    files.append(str(regime_path))
+    files.append(_write_research_report(dataset, test, performance_summary, config, output_dir))
+    return files
